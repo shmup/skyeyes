@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# pyright: reportMissingImports=false
 """
 Eyes: Fetches your IP's lat/lng and saves a Mapbox wallpaper.png
 
@@ -13,11 +12,12 @@ Usage:
 """
 
 import argparse
-import os
 import random
 import subprocess
 import datetime
 from io import BytesIO
+from pathlib import Path
+from dataclasses import dataclass
 
 import requests
 import geocoder
@@ -25,58 +25,32 @@ import numpy as np
 import cv2
 from PIL import Image, ImageDraw, ImageFont, ImageChops
 
+# Constants and Defaults
 API_KEY = os.getenv("MAPBOX_KEY")
-WALLPAPER_DIR = os.path.expanduser("~/.cache/eyes/")
-BACKGROUND_FILE = os.path.expanduser('~/.feh-backgrounds')
+
+DEFAULTS = {
+    'ZOOM': 15,
+    'SIZE': (1280, 850),
+    'FONT_SIZE': 24,
+    'FONT_PATH': "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",  # Default font path
+}
+
+WALLPAPER_DIR = Path.home() / ".cache" / "eyes"
+BACKGROUND_FILE = Path.home() / ".feh-backgrounds"
 
 
-def get_public_ip():
-    return requests.get("https://ident.me").text.strip()
+@dataclass
+class Config:
+    path: Path
+    factor: float = 0.1
+    zoom: int = DEFAULTS['ZOOM']
+    dry_run: bool = False
+    transformation: str = 'default'
+    region: str | None = None
+    wallpaper: bool = False
 
 
-def get_location(ip):
-    g = geocoder.ip(ip)
-    return g.latlng
-
-
-def get_map_image(lat, lng, zoom=15, size=(1280, 850)):
-    url = f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/static/{lng},{lat},{zoom}/{size[0]}x{size[1]}?access_token={API_KEY}"
-    response = requests.get(url)
-    if response.ok:
-        return Image.open(BytesIO(response.content))
-    raise ValueError(f"Map request failed with status {response.status_code}")
-
-
-def add_text(img, lat, lng, x=30, y=50, font_path="/home/jtm/.fonts/FreeMono.ttf", size=24):
-    font = ImageFont.truetype(font_path, size)
-    draw = ImageDraw.Draw(img)
-    text_color, outline_color = (255, 0, 0), (255, 0, 0)
-    texts = [f"Lat: {lat}", f"Lon: {lng}"]
-    offsets = [(-3, -3), (-3, 3), (3, -3), (3, 3), (-1, -1), (-1, 1), (1, -1), (1, 1)]
-
-    for dx, dy in offsets[:4]:
-        draw.text((x + dx, y + dy), texts[0], font=font, fill=(0, 0, 0))
-        draw.text((x + dx, y + 50 + dy), texts[1], font=font, fill=(0, 0, 0))
-
-    for dx, dy in offsets[4:]:
-        draw.text((x + dx, y + dy), texts[0], font=font, fill=outline_color)
-        draw.text((x + dx, y + 50 + dy), texts[1], font=font, fill=outline_color)
-
-    draw.text((x, y), texts[0], fill=text_color, font=font)
-    draw.text((x, y + 50), texts[1], fill=text_color, font=font)
-
-
-def randomize_axis(coords, factor=0.1):
-    lat, lng = coords
-    if random.choice([True, False]):
-        lat += random.uniform(-factor, factor)
-    else:
-        lng += random.uniform(-factor, factor)
-    lat = max(min(lat, 90), -90)
-    lng = max(min(lng, 180), -180)
-    return round(lat, 4), round(lng, 4)
-
-
+# Image Transformation Functions
 def resize_image(img, size=(1280, 800)):
     return img.resize(size, Image.Resampling.LANCZOS)
 
@@ -95,9 +69,9 @@ def add_noise(img, location=0.0, scale=35):
 def glitch_effect(img):
     img = img.convert("RGBA")
     r, g, b, a = img.split()
-    r = ImageChops.offset(r, 5)
-    g = ImageChops.offset(g, -5)
-    return Image.merge("RGBA", (r, g, b, a))
+    r = ImageChops.offset(r, 5, 0)
+    g = ImageChops.offset(g, -5, 0)
+    return Image.merge("RGBA", (r, g, b, a)).convert("RGB")
 
 
 def hellzone(img):
@@ -122,7 +96,7 @@ def noisy_blob(img, num=100, min_r=20, max_r=80, dilate=3, blur=5):
     mono_arr = np.asarray(convert_to_monochrome(img))
     mask = np.zeros((img.height, img.width), dtype=np.uint8)
     for _ in range(num):
-        x, y, r = random.randint(0, img.width), random.randint(0, img.height), random.randint(min_r, max_r)
+        x, y, r = random.randint(0, img.width - 1), random.randint(0, img.height - 1), random.randint(min_r, max_r)
         cv2.circle(mask, (x, y), r, 255, -1)
     kernel = np.ones((5, 5), np.uint8)
     dilated = cv2.dilate(mask, kernel, iterations=dilate)
@@ -131,98 +105,179 @@ def noisy_blob(img, num=100, min_r=20, max_r=80, dilate=3, blur=5):
     return Image.fromarray(masked.astype(np.uint8))
 
 
-def noisy_dots(img, num=10, min_r=20, max_r=80):
-    img_arr = np.asarray(img)
-    mono_arr = np.asarray(convert_to_monochrome(img))
-    mask = np.zeros((img.height, img.width), dtype=np.uint8)
-    for _ in range(num):
-        x, y, r = random.randint(0, img.width), random.randint(0, img.height), random.randint(min_r, max_r)
-        cv2.circle(mask, (x, y), r, 255, -1)
-    masked = np.where(mask[..., None], img_arr, mono_arr)
-    return Image.fromarray(masked.astype(np.uint8))
-
-
 def crop_bottom(img, pixels):
     width, height = img.size
     return img.crop((0, 0, width, height - pixels))
 
 
+# Effect Classes
+class Effect:
+
+    def apply(self, img):
+        return img
+
+
+class ResizeEffect(Effect):
+
+    def __init__(self, size=(1280, 800)):
+        self.size = size
+
+    def apply(self, img):
+        return resize_image(img, self.size)
+
+
+class CropBottomEffect(Effect):
+
+    def __init__(self, pixels):
+        self.pixels = pixels
+
+    def apply(self, img):
+        return crop_bottom(img, self.pixels)
+
+
+class MonochromeEffect(Effect):
+
+    def apply(self, img):
+        return convert_to_monochrome(img)
+
+
+class NoisyBlobEffect(Effect):
+
+    def apply(self, img):
+        return noisy_blob(img)
+
+
+class AddNoiseEffect(Effect):
+
+    def __init__(self, scale=10):
+        self.scale = scale
+
+    def apply(self, img):
+        return add_noise(img, scale=self.scale)
+
+
+class GlitchEffect(Effect):
+
+    def apply(self, img):
+        return glitch_effect(img)
+
+
+class HellzoneEffect(Effect):
+
+    def apply(self, img):
+        return hellzone(img)
+
+
+class WatercolorEffect(Effect):
+
+    def apply(self, img):
+        return watercolor_effect(img)
+
+
+# Transformation Sets
+TRANSFORMATIONS = {
+    "default": [
+        ResizeEffect(),
+        CropBottomEffect(50),
+        MonochromeEffect(),
+        NoisyBlobEffect(),
+        AddNoiseEffect(scale=10),
+    ],
+    "simple_noise": [
+        ResizeEffect(),
+        CropBottomEffect(50),
+        AddNoiseEffect(scale=20),
+    ],
+    "glitch": [
+        ResizeEffect(),
+        CropBottomEffect(50),
+        GlitchEffect(),
+    ],
+    "red_overlay": [
+        ResizeEffect(),
+        CropBottomEffect(50),
+        HellzoneEffect(),
+    ],
+    "watercolor": [
+        ResizeEffect(),
+        CropBottomEffect(50),
+        WatercolorEffect(),
+    ],
+}
+
+
+class ImageProcessor:
+
+    def __init__(self, transformation_set):
+        self.transformations = TRANSFORMATIONS[transformation_set]
+
+    def process(self, img):
+        for effect in self.transformations:
+            img = effect.apply(img)
+        return img
+
+
+# Wallpaper Functions
 def archive(img, path):
-    os.makedirs(WALLPAPER_DIR, exist_ok=True)
-    basename, ext = os.path.splitext(os.path.basename(path))
+    WALLPAPER_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-    backup = os.path.join(WALLPAPER_DIR, f"{timestamp}-{basename}{ext}")
-    img.save(backup)
+    backup_path = WALLPAPER_DIR / f"{timestamp}-{path.name}"
+    img.save(backup_path)
 
 
 def set_wallpaper(path):
-    if os.path.isfile(BACKGROUND_FILE):
-        with open(BACKGROUND_FILE, 'r+') as file:
+    if BACKGROUND_FILE.is_file():
+        with BACKGROUND_FILE.open('r+') as file:
             lines = file.readlines()
             if lines:
                 lines[-1] = f"# {lines[-1]}"
             file.seek(0)
             file.writelines(lines)
-    subprocess.run(["feh", "--bg-scale", path])
-    with open(BACKGROUND_FILE, 'a') as file:
+    subprocess.run(["feh", "--bg-scale", str(path)])
+    with BACKGROUND_FILE.open('a') as file:
         file.write(f"feh --bg-scale {path}\n")
 
 
-TRANSFORMATIONS = {
-    "default": [
-        ("resize", resize_image),
-        ("crop_bottom", lambda img: crop_bottom(img, 50)),
-        ("monochrome", convert_to_monochrome),
-        ("noisy_blob", noisy_blob),
-        ("add_noise", lambda img: add_noise(img, scale=10)),
-    ],
-    "simple_noise": [
-        ("resize", resize_image),
-        ("crop_bottom", lambda img: crop_bottom(img, 50)),
-        ("add_noise", lambda img: add_noise(img, scale=20)),
-    ],
-    "glitch": [
-        ("resize", resize_image),
-        ("crop_bottom", lambda img: crop_bottom(img, 50)),
-        ("glitch", glitch_effect),
-    ],
-    "red_overlay": [
-        ("resize", resize_image),
-        ("crop_bottom", lambda img: crop_bottom(img, 50)),
-        ("hellzone", hellzone),
-    ],
-    "watercolor": [
-        ("resize", resize_image),
-        ("crop_bottom", lambda img: crop_bottom(img, 50)),
-        ("watercolor", watercolor_effect),
-    ],
-}
+# Location Functions
+def get_public_ip():
+    return requests.get("https://ident.me").text.strip()
 
 
-def apply_transformations(img, transformations):
-    for _, func in transformations:
-        img = func(img)
-    return img
+def get_location(ip):
+    g = geocoder.ip(ip)
+    return g.latlng
+
+
+def get_map_image(lat, lng, zoom=DEFAULTS['ZOOM'], size=DEFAULTS['SIZE']):
+    url = f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/static/{lng},{lat},{zoom}/{size[0]}x{size[1]}?access_token={API_KEY}"
+    response = requests.get(url)
+    if response.ok:
+        return Image.open(BytesIO(response.content))
+    else:
+        raise ValueError(f"Map request failed with status {response.status_code}")
+
+
+def randomize_axis(coords, factor=0.1):
+    lat, lng = coords
+    lat += random.uniform(-factor, factor)
+    lng += random.uniform(-factor, factor)
+    lat = max(min(lat, 90), -90)
+    lng = max(min(lng, 180), -180)
+    return round(lat, 4), round(lng, 4)
 
 
 def get_region_coords(region_name):
-    headers = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
     g = geocoder.osm(region_name, headers=headers)
-    if g.ok:
-        return g.latlng
-    return None
+    return g.latlng if g.ok else None
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("path", nargs="?", default="wallpaper.png", help="Save path")
-    parser.add_argument("-f",
-                        "--factor",
-                        type=float,
-                        default=0.1,
-                        help="Random coordinate adjustment factor (default: 0.1)")
+    parser.add_argument("-f", "--factor", type=float, default=0.1, help="Random coordinate adjustment factor")
     parser.add_argument("-w", "--wallpaper", action="store_true", help="Set as wallpaper")
-    parser.add_argument("-z", "--zoom", type=int, default=15, help="Map zoom level")
+    parser.add_argument("-z", "--zoom", type=int, default=DEFAULTS['ZOOM'], help="Map zoom level")
     parser.add_argument("-d", "--dry", action="store_true", help="Dry run")
     parser.add_argument("-t",
                         "--transformation",
@@ -231,37 +286,46 @@ def main():
                         help="Transformation set")
     parser.add_argument("-r", "--region", help='Specify region, e.g., "Traverse City"')
     args = parser.parse_args()
-    ip = None
 
-    if args.region:
-        coords = get_region_coords(args.region)
+    config = Config(
+        path=Path(args.path),
+        factor=args.factor,
+        zoom=args.zoom,
+        dry_run=args.dry,
+        transformation=args.transformation,
+        region=args.region,
+        wallpaper=args.wallpaper,
+    )
+
+    ip = None
+    if config.region:
+        coords = get_region_coords(config.region)
         if not coords:
-            print(f"Could not find coordinates for {args.region}")
+            print(f"Could not find coordinates for {config.region}")
             exit(1)
     else:
         ip = get_public_ip()
         coords = get_location(ip)
+        if not coords:
+            print("Location not found")
+            exit(1)
 
-    if not coords:
-        print("Location not found")
-        exit(1)
+    lat, lng = randomize_axis(coords, factor=config.factor)
 
-    lat, lng = randomize_axis(coords, factor=args.factor)
-
-    if args.dry:
-        print(ip, coords, (lat, lng))
+    if config.dry_run:
+        print(f"IP: {ip}, Original Coords: {coords}, Adjusted Coords: {(lat, lng)}")
         exit()
 
-    img = get_map_image(lat, lng, zoom=args.zoom)
-    transformations = TRANSFORMATIONS.get(args.transformation, TRANSFORMATIONS["default"])
-    final_img = apply_transformations(img, transformations)
-    archive(final_img, args.path)
-    final_img.save(args.path)
+    img = get_map_image(lat, lng, zoom=config.zoom)
+    processor = ImageProcessor(config.transformation)
+    final_img = processor.process(img)
+    archive(final_img, config.path)
+    final_img.save(str(config.path))
 
-    if args.wallpaper:
-        set_wallpaper(args.path)
+    if config.wallpaper:
+        set_wallpaper(config.path)
 
-    print(f"Saved to {args.path}")
+    print(f"Saved to {config.path}")
 
 
 if __name__ == "__main__":
