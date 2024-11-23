@@ -204,19 +204,23 @@ def apply_transformations(img, transformations):
         img = func(img)
     return img
 
+
 def get_region_coords(region_name):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
-    }
+    headers = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'}
     g = geocoder.osm(region_name, headers=headers)
     if g.ok:
         return g.latlng
     return None
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("path", nargs="?", default="wallpaper.png", help="Save path")
-    parser.add_argument("-f", "--factor", type=float, default=0.1, help="Random coordinate adjustment factor (default: 0.1)")
+    parser.add_argument("-f",
+                        "--factor",
+                        type=float,
+                        default=0.1,
+                        help="Random coordinate adjustment factor (default: 0.1)")
     parser.add_argument("-w", "--wallpaper", action="store_true", help="Set as wallpaper")
     parser.add_argument("-z", "--zoom", type=int, default=15, help="Map zoom level")
     parser.add_argument("-d", "--dry", action="store_true", help="Dry run")
