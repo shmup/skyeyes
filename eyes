@@ -66,12 +66,12 @@ def add_text(img, lat, lng, x=30, y=50, font_path="/home/jtm/.fonts/FreeMono.ttf
     draw.text((x, y + 50), texts[1], fill=text_color, font=font)
 
 
-def randomize_axis(coords):
+def randomize_axis(coords, factor=0.1):
     lat, lng = coords
     if random.choice([True, False]):
-        lat += random.uniform(-10, 10)
+        lat += random.uniform(-factor, factor)
     else:
-        lng += random.uniform(-10, 10)
+        lng += random.uniform(-factor, factor)
     lat = max(min(lat, 90), -90)
     lng = max(min(lng, 180), -180)
     return round(lat, 4), round(lng, 4)
@@ -111,11 +111,8 @@ def watercolor_effect(img):
                           stdout=subprocess.PIPE) as proc:
         img_bytes = BytesIO()
         img.save(img_bytes, format='PNG')
-        assert proc.stdin is not None
         proc.stdin.write(img_bytes.getvalue())
-        assert proc.stdin.close is not None
         proc.stdin.close()
-        assert proc.stdout is not None
         output = proc.stdout.read()
     return Image.open(BytesIO(output)) if output else img
 
@@ -181,6 +178,7 @@ TRANSFORMATIONS = {
     ],
     "simple_noise": [
         ("resize", resize_image),
+        ("crop_bottom", lambda img: crop_bottom(img, 50)),
         ("add_noise", lambda img: add_noise(img, scale=20)),
     ],
     "glitch": [
@@ -190,10 +188,12 @@ TRANSFORMATIONS = {
     ],
     "red_overlay": [
         ("resize", resize_image),
+        ("crop_bottom", lambda img: crop_bottom(img, 50)),
         ("hellzone", hellzone),
     ],
     "watercolor": [
         ("resize", resize_image),
+        ("crop_bottom", lambda img: crop_bottom(img, 50)),
         ("watercolor", watercolor_effect),
     ],
 }
@@ -204,11 +204,21 @@ def apply_transformations(img, transformations):
         img = func(img)
     return img
 
+def get_region_coords(region_name):
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
+    }
+    g = geocoder.osm(region_name, headers=headers)
+    if g.ok:
+        return g.latlng
+    return None
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("path", nargs="?", default="wallpaper.png", help="Save path")
+    parser.add_argument("-f", "--factor", type=float, default=0.1, help="Random coordinate adjustment factor (default: 0.1)")
     parser.add_argument("-w", "--wallpaper", action="store_true", help="Set as wallpaper")
+    parser.add_argument("-z", "--zoom", type=int, default=15, help="Map zoom level")
     parser.add_argument("-d", "--dry", action="store_true", help="Dry run")
     parser.add_argument("-t",
                         "--transformation",
@@ -217,23 +227,28 @@ def main():
                         help="Transformation set")
     parser.add_argument("-r", "--region", help='Specify region, e.g., "Traverse City"')
     args = parser.parse_args()
+    ip = None
 
-    ip = get_public_ip()
-    coords = get_location(ip)
+    if args.region:
+        coords = get_region_coords(args.region)
+        if not coords:
+            print(f"Could not find coordinates for {args.region}")
+            exit(1)
+    else:
+        ip = get_public_ip()
+        coords = get_location(ip)
+
     if not coords:
         print("Location not found")
         exit(1)
-    lat, lng = randomize_axis(coords)
+
+    lat, lng = randomize_axis(coords, factor=args.factor)
 
     if args.dry:
         print(ip, coords, (lat, lng))
         exit()
 
-    if args.region:
-        # Placeholder: Implement region-based coordinates
-        print(f"Region feature not implemented: {args.region}")
-
-    img = get_map_image(lat, lng)
+    img = get_map_image(lat, lng, zoom=args.zoom)
     transformations = TRANSFORMATIONS.get(args.transformation, TRANSFORMATIONS["default"])
     final_img = apply_transformations(img, transformations)
     archive(final_img, args.path)
