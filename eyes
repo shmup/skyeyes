@@ -11,28 +11,27 @@ Usage:
     eyes --wallpaper
 """
 
-import argparse
-import random
-import subprocess
-import datetime
+from PIL import Image, ImageChops
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from dataclasses import dataclass
-
-import requests
+import argparse
+import cv2
+import datetime
 import geocoder
 import numpy as np
-import cv2
-from PIL import Image, ImageDraw, ImageFont, ImageChops
+import os
+import random
+import requests
+import subprocess
 
-# Constants and Defaults
 API_KEY = os.getenv("MAPBOX_KEY")
 
 DEFAULTS = {
     'ZOOM': 15,
     'SIZE': (1280, 850),
     'FONT_SIZE': 24,
-    'FONT_PATH': "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",  # Default font path
+    'FONT_PATH': "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
 }
 
 WALLPAPER_DIR = Path.home() / ".cache" / "eyes"
@@ -50,7 +49,6 @@ class Config:
     wallpaper: bool = False
 
 
-# Image Transformation Functions
 def resize_image(img, size=(1280, 800)):
     return img.resize(size, Image.Resampling.LANCZOS)
 
@@ -80,11 +78,14 @@ def hellzone(img):
 
 
 def watercolor_effect(img):
-    with subprocess.Popen(["watercolor", "-s", "5", "-e", "5", "-m", "50", "-c", "5"],
-                          stdin=subprocess.PIPE,
-                          stdout=subprocess.PIPE) as proc:
+    with subprocess.Popen(
+        ["watercolor", "-s", "5", "-e", "5", "-m", "50", "-c", "5"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE) as proc:
         img_bytes = BytesIO()
         img.save(img_bytes, format='PNG')
+        if not proc.stdin or not proc.stdout:
+            return img
         proc.stdin.write(img_bytes.getvalue())
         proc.stdin.close()
         output = proc.stdout.read()
@@ -96,8 +97,9 @@ def noisy_blob(img, num=100, min_r=20, max_r=80, dilate=3, blur=5):
     mono_arr = np.asarray(convert_to_monochrome(img))
     mask = np.zeros((img.height, img.width), dtype=np.uint8)
     for _ in range(num):
-        x, y, r = random.randint(0, img.width - 1), random.randint(0, img.height - 1), random.randint(min_r, max_r)
-        cv2.circle(mask, (x, y), r, 255, -1)
+        x, y, r = random.randint(0, img.width - 1), random.randint(
+            0, img.height - 1), random.randint(min_r, max_r)
+        cv2.circle(mask, (x, y), r, (255, 255, 255), -1)
     kernel = np.ones((5, 5), np.uint8)
     dilated = cv2.dilate(mask, kernel, iterations=dilate)
     blurred = cv2.GaussianBlur(dilated, (blur, blur), 0)
@@ -110,7 +112,6 @@ def crop_bottom(img, pixels):
     return img.crop((0, 0, width, height - pixels))
 
 
-# Effect Classes
 class Effect:
 
     def apply(self, img):
@@ -174,7 +175,6 @@ class WatercolorEffect(Effect):
         return watercolor_effect(img)
 
 
-# Transformation Sets
 TRANSFORMATIONS = {
     "default": [
         ResizeEffect(),
@@ -217,12 +217,46 @@ class ImageProcessor:
         return img
 
 
-# Wallpaper Functions
 def archive(img, path):
     WALLPAPER_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     backup_path = WALLPAPER_DIR / f"{timestamp}-{path.name}"
     img.save(backup_path)
+
+
+def get_public_ip():
+    return requests.get("https://ident.me").text.strip()
+
+
+def get_location(ip):
+    g = geocoder.ip(ip)
+    return g.latlng
+
+
+def get_map_image(lat, lng, zoom=DEFAULTS['ZOOM'], size=DEFAULTS['SIZE']):
+    root_url = "https://api.mapbox.com/styles/v1/mapbox/satellite-v9/static"
+    url = f"{root_url}/{lng},{lat},{zoom}/{size[0]}x{size[1]}?access_token={API_KEY}"
+    response = requests.get(url)
+    if response.ok:
+        return Image.open(BytesIO(response.content))
+    else:
+        raise ValueError(
+            f"Map request failed with status {response.status_code}")
+
+
+def get_region_coords(region_name):
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    g = geocoder.osm(region_name, headers=headers)
+    return g.latlng if g.ok else None
+
+
+def randomize_axis(coords, factor=0.1):
+    lat, lng = coords
+    lat += random.uniform(-factor, factor)
+    lng += random.uniform(-factor, factor)
+    lat = max(min(lat, 90), -90)
+    lng = max(min(lng, 180), -180)
+    return round(lat, 4), round(lng, 4)
 
 
 def set_wallpaper(path):
@@ -238,53 +272,36 @@ def set_wallpaper(path):
         file.write(f"feh --bg-scale {path}\n")
 
 
-# Location Functions
-def get_public_ip():
-    return requests.get("https://ident.me").text.strip()
-
-
-def get_location(ip):
-    g = geocoder.ip(ip)
-    return g.latlng
-
-
-def get_map_image(lat, lng, zoom=DEFAULTS['ZOOM'], size=DEFAULTS['SIZE']):
-    url = f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/static/{lng},{lat},{zoom}/{size[0]}x{size[1]}?access_token={API_KEY}"
-    response = requests.get(url)
-    if response.ok:
-        return Image.open(BytesIO(response.content))
-    else:
-        raise ValueError(f"Map request failed with status {response.status_code}")
-
-
-def randomize_axis(coords, factor=0.1):
-    lat, lng = coords
-    lat += random.uniform(-factor, factor)
-    lng += random.uniform(-factor, factor)
-    lat = max(min(lat, 90), -90)
-    lng = max(min(lng, 180), -180)
-    return round(lat, 4), round(lng, 4)
-
-
-def get_region_coords(region_name):
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    g = geocoder.osm(region_name, headers=headers)
-    return g.latlng if g.ok else None
-
-
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("path", nargs="?", default="wallpaper.png", help="Save path")
-    parser.add_argument("-f", "--factor", type=float, default=0.1, help="Random coordinate adjustment factor")
-    parser.add_argument("-w", "--wallpaper", action="store_true", help="Set as wallpaper")
-    parser.add_argument("-z", "--zoom", type=int, default=DEFAULTS['ZOOM'], help="Map zoom level")
+    parser.add_argument("path",
+                        nargs="?",
+                        default="wallpaper.png",
+                        help="Save path")
+    parser.add_argument("-f",
+                        "--factor",
+                        type=float,
+                        default=0.1,
+                        help="Random coordinate adjustment factor")
+    parser.add_argument("-w",
+                        "--wallpaper",
+                        action="store_true",
+                        help="Set as wallpaper")
+    parser.add_argument("-z",
+                        "--zoom",
+                        type=int,
+                        default=DEFAULTS['ZOOM'],
+                        help="Map zoom level")
     parser.add_argument("-d", "--dry", action="store_true", help="Dry run")
     parser.add_argument("-t",
                         "--transformation",
                         choices=TRANSFORMATIONS.keys(),
                         default="default",
                         help="Transformation set")
-    parser.add_argument("-r", "--region", help='Specify region, e.g., "Traverse City"')
+    parser.add_argument("-r",
+                        "--region",
+                        help='Specify region, e.g., "McComb Ohio"',
+                        default="Traverse City Michigan")
     args = parser.parse_args()
 
     config = Config(
@@ -313,7 +330,9 @@ def main():
     lat, lng = randomize_axis(coords, factor=config.factor)
 
     if config.dry_run:
-        print(f"IP: {ip}, Original Coords: {coords}, Adjusted Coords: {(lat, lng)}")
+        print(
+            f"IP: {ip}, Original Coords: {coords}, Adjusted Coords: {(lat, lng)}"
+        )
         exit()
 
     img = get_map_image(lat, lng, zoom=config.zoom)
